@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <style type="text/css">
+        .taskContainer {
+            display: flex;
+            justify-content: space-between;
+            border-radius: 15px;
+            border: 2px solid black;
+            margin-bottom: 1px;
+            padding: 10px;
+        }
+
+        .formsContainer {
+            display: flex;
+        }
+
+        .ongoing {
+            background-color: #6ac7db;
+        }
+
+        .failed {
+            background-color: #df1d1d;
+        }
+
+        .done {
+            background-color: #3adf1d;
+        }
+
+        ul {
+            list-style-type: none;
+        }
+    </style>
+</head>
+<body>
+
+{% if current_task is not none %}
+<h1>Current Pomodoro</h1>
+    <p>Current task: {{ current_task.description|e }}</p>
+<!-- Hidden by default, needs JS enabled to run. -->
+<div id="pomodoro" hidden>
+    <p>Remaining time: <span id='remainingTime'></span></p>
+</div>
+<br>
+<script type="text/javascript">
+    var pomodoroDiv = document.getElementById('pomodoro');
+    pomodoroDiv.hidden = false;
+
+    const STARTED_AT = {{ current_task.started_at }};
+    const POMODORO_TIME = 45*60;
+    Notification.requestPermission();
+
+    var audio = document.createElement("audio");
+    audio.src='https://gregoiredelannoy.fr/bellring.mp3'
+
+    var remainingTime = document.getElementById("remainingTime");
+
+    function secondsToHms(d) {
+        d = Number(d);
+        var h = Math.floor(d / 3600);
+        var m = Math.floor(d % 3600 / 60);
+        var s = Math.floor(d % 3600 % 60);
+
+        var hDisplay = h > 0 ? h + (h == 1 ? " hour, " : " hours, ") : "";
+        var mDisplay = m > 0 ? m + (m == 1 ? " minute, " : " minutes, ") : "";
+        var sDisplay = s > 0 ? s + (s == 1 ? " second" : " seconds") : "";
+        return hDisplay + mDisplay + sDisplay; 
+    }
+
+    function updateRemainingTime() {
+        var remaingingSeconds = POMODORO_TIME + STARTED_AT - (Date.now() / 1000);
+        remainingTime.innerText = secondsToHms(remaingingSeconds);
+        if (remaingingSeconds < 0) {
+            clearInterval(interval);
+            var text = "Time elapsed for task!";
+            remainingTime.innerText = text;
+            audio.play();
+            if (Notification.permission === "granted") {
+                var notification = new Notification(text);
+            } else {
+                alert(text);
+            }
+        }
+    }
+
+    var interval = setInterval(updateRemainingTime, 1000);
+</script>
+{% endif %}
+
+<h1>Tasks</h1>
+<ul>
+{% for item in tree recursive %}
+  <li>
+    <div class="taskContainer {% if item.data.state.value == 2 %} ongoing {% elif item.data.state.value == 3 %} failed {% elif item.data.state.value == 4%} done {% endif %}">
+        <div>
+            #{{item.data.id}}: {{item.data.description|e}} // {{item.data.total_time()}}
+            {% if item.data.state.value == 3 or item.data.state.value == 4 %}
+                // {{item.data.finished_at_human()}}
+            {% endif %}
+        </div>
+        <div class="formsContainer">
+        {% if item.data.state.value == 1 and current_task is none %}
+            <form action='start/{{ item.data.id }}' method="POST"><input type="submit" value="start"></form>
+        {% elif item.data.state.value == 2 %}
+            <form action='done/{{ item.data.id }}' method="POST"><input type="submit" value="done"></form>
+            <form action='failed/{{ item.data.id }}' method="POST"><input type="submit" value="failed"></form>
+        {% endif %}
+            <form action="new" method="POST">
+                <input type="hidden" name="parent_task_id" value="{{ item.data.id }}">
+                <input type="text" size="10" maxlength="1000" name="description">
+                <input type="submit" value="new subtask">
+            </form>
+        </div>
+    </div>
+  {% if item.children|length > 0 %}
+    <ul>
+        {{ loop(item.children)}}
+    </ul>
+  {% endif %}
+  </li>
+{% endfor %}
+</ul>
+<h2>New Root Task</h2>
+<form action="new" method="POST">
+    <input type="text" size="100" maxlength="1000" name="description">
+    <input type="submit" value="new task">
+</form>
+</body>
+</html>

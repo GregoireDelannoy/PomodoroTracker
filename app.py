@@ -1,14 +1,18 @@
 import bottle
 import sqlite3
-import os.path
 from jinja2 import Template
 from enum import Enum
 from time import time
-from functools import reduce
+from datetime import datetime
 
 app = bottle.Bottle()
+ROOT_PATH = '/pomodoro/'
 
-DB_NAME = 'db.sqlite3'
+def seconds_to_hms(seconds):
+    h = str(int(seconds / 3600))
+    m = str(int(seconds % 3600 / 60))
+    s = str(int(seconds % 3600 % 60))
+    return h + ':' + m + ':' + s
 
 class TaskStates(Enum):
     CREATED = 1
@@ -17,15 +21,35 @@ class TaskStates(Enum):
     DONE = 4
 
 class Task():
-    def __init__(self, description):
-        self.description = description
+    def __init__(self):
+        self.id = None
+        self.description = ''
         self.state = TaskStates.CREATED
         self.created_at = time()
-        self.started_at = None
-        self.finished_at = None
+        self.started_at = 0
+        self.finished_at = 0
+        self.total_children_time = 0
+
+    def from_storage(self, res):
+        self.id = res[0]
+        self.description = res[1]
+        self.state = TaskStates(res[2])
+        self.created_at = res[3]
+        self.started_at = res[4]
+        self.finished_at = res[5]
 
     def __str__(self):
-        return 'Task %s with state %d created at %d, started at %d, finished at %d' (self.description, self.state, self.created_at, self.started_at, self.finished_at)
+        return 'Task: ' + str(self.id) + str(self.description) + ' with state ' + str(self.state) + ' created at ' + str(self.created_at)
+
+    def total_time(self):
+        time = self.total_children_time
+        if self.state in (TaskStates.DONE, TaskStates.FAILED):
+            time += self.finished_at - self.started_at
+        return seconds_to_hms(time)
+
+    def finished_at_human(self):
+        local_time = datetime.fromtimestamp(self.finished_at)
+        return local_time.strftime("%Y-%m-%d %H:%M")
 
     def start(self):
         if self.state == TaskStates.CREATED:
@@ -34,7 +58,7 @@ class Task():
         else:
             raise Exception('Cannot start task: ' + str(self))
 
-    def fail(self):
+    def failed(self):
         if self.state == TaskStates.ONGOING:
             self.state = TaskStates.FAILED
             self.finished_at = time()
@@ -48,117 +72,141 @@ class Task():
         else:
             raise Exception('Cannot terminate task: ' + str(self))
 
+class Storage():
+    def __init__(self):
+        self.DB_NAME = ':memory:'
+        self.conn = sqlite3.connect(self.DB_NAME)
+        cursor = self.conn.cursor()
+        cursor.execute('''
+CREATE TABLE tasks (
+task_id INTEGER PRIMARY KEY,
+description TEXT NOT NULL,
+state INTEGER NOT NULL,
+created_at INTEGER NOT NULL,
+started_at INTEGER,
+finished_at INTEGER,
+parent_task_id INTEGER);''')
+        self.conn.commit()
 
+    def __fetch_all(self, statement, data):
+        cursor = self.conn.cursor()
+        cursor.execute(statement, data)
+        result = cursor.fetchall()
+        cursor.close()
+        return result
 
+    def __execute(self, statement, data):
+        cursor = self.conn.cursor()
+        cursor.execute(statement, data)
+        cursor.close()
+        self.conn.commit()
 
-index_template = Template('''
-<!doctype html>
-<html lang="en">
-<body>
-<h1>Tasks</h1>
-<h2>New task</h2>
-<form action="/new" method="POST">
-  <input type="text" size="100" maxlength="1000" name="description">
-  <input type="submit" name="save" value="save">
-</form>
-<h2>Current todo</h2>
-<ul>
-{% for item in tasks %}
-  <li>
-  {{item.description}} :
-  {% if item.ongoing %}
-  <form action="/done/{{item.task_id}}" method="POST"><input type="submit" name="save" value="done"></form>
-  <form action="/failed/{{item.task_id}}" method="POST"><input type="submit" name="save" value="failed"></form>
-  {% else %}
-  <form action="/start/{{item.task_id}}" method="POST"><input type="submit" name="save" value="start"></form>
-  {% endif %}
-  :
-  <form action="/delete/{{item.task_id}}" method="POST"><input type="submit" name="submit" value="delete"></form> </li>
-{% endfor %}
-</ul>
-</body>
-</html>
-''')
+    def get_task(self, id):
+        return self.__fetch_all("SELECT task_id, description, state, created_at, started_at, finished_at, parent_task_id FROM tasks WHERE task_id = ?", (id,))[0]
+        # comma after id, see https://stackoverflow.com/a/7305758
 
-def fetch_all(statement):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute(statement)
-    result = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return result
+    def get_tasks(self):
+        return self.__fetch_all("SELECT task_id, description, state, created_at, started_at, finished_at, parent_task_id FROM tasks", ())
 
-def insert(statement, data):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    print(statement)
-    cursor.execute(statement, data)
-    print(cursor.lastrowid)
-    cursor.close()
-    conn.commit()
-    conn.close()
+    def new_task(self, task, parent_id):
+        if parent_id == None:
+            self.__execute("INSERT INTO tasks(description, state, created_at) VALUES (?, ?, ?);", (task.description, task.state.value, task.created_at))
+        else:
+            self.__execute("INSERT INTO tasks(description, state, created_at, parent_task_id) VALUES (?, ?, ?, ?);", (task.description, task.state.value, task.created_at, parent_id))
 
-def ongoing_tasks(user_id):
-    res = fetch_all("SELECT events.type, tasks.task_id FROM events JOIN tasks WHERE events.task_id=tasks.task_id AND tasks.owner_user_id = %d ORDER BY events.timestamp" % (user_id))
-    ongoing = []
-    for item in res:
-        type = item[0]
-        id = item[1]
-        if type in ("STARTED"):
-            ongoing.append(id)
-            print('appending task id %d, because type: %s' % (id, type))
-        elif type in ("DONE", "FAILED"):
-            ongoing.remove(id)
-    print(ongoing)
-    return ongoing
+    def update_task(self, task):
+        self.__execute("UPDATE tasks SET description = ?, state = ?, started_at = ?, finished_at = ? WHERE task_id = ?", (task.description, task.state.value, task.started_at, task.finished_at, task.id))
 
+class Node():
+    def __init__(self, id, data):
+        self.id = id
+        self.data = data
+        self.children = []
+        self.parent_node = None
 
+    def __str__(self):
+        return str(self.data)
+
+    def __iter__(self):
+        return iter(self.children)
+
+    def add_child(self, child):
+        self.children.append(child)
+
+class Tree():
+    def __add_to_ancestors(self, node, seconds):
+        if node.data != None:
+            node.data.total_children_time += seconds
+            self.__add_to_ancestors(node.parent_node, seconds)
+
+    def __fill_elapsed_time(self, node):
+        if node.data.state in (TaskStates.DONE, TaskStates.FAILED):
+            elapsed_time = node.data.finished_at - node.data.started_at
+            self.__add_to_ancestors(node.parent_node, elapsed_time)
+
+    def __append(self, current_node, node, parent_id):
+        if parent_id == None or current_node.id == parent_id:
+            current_node.add_child(node)
+            node.parent_node = current_node
+            self.__fill_elapsed_time(node)
+        else:
+            for child in current_node.children:
+                self.__append(child, node, parent_id)
+
+    def __init__(self, storage):
+        self.root = Node(-1, None)
+        raw_tasks = storage.get_tasks()
+        self.current_task = None
+        for raw_task in raw_tasks:
+            id = raw_task[0]
+            parent_id = raw_task[6]
+
+            task = Task()
+            task.from_storage(raw_task)
+
+            if task.state == TaskStates.ONGOING:
+                self.current_task = task
+
+            self.__append(self.root, Node(id, task), parent_id)
+
+storage = Storage()
+index_template = Template(open('index.html.j2').read())
 
 # ROUTES
 @app.get('/')
 def home():
-    # TODO: user mgmt
-    user_id = 0
-
-    res = fetch_all("SELECT tasks.task_id, tasks.description, users.email FROM tasks JOIN users;")
-    ongoing = ongoing_tasks(user_id)
-    tasks = list(map(lambda i: {'task_id': i[0], 'description': i[1], 'ongoing': i[0] in ongoing}, res))
-    print(tasks)
-    return index_template.render(tasks=tasks)
+    tree = Tree(storage)
+    return index_template.render(tree = tree.root, current_task = tree.current_task)
 
 @app.post('/new')
 def new():
-    user_id = 0
-    description = bottle.request.POST.description
-    statement = "INSERT INTO tasks(description, owner_user_id) VALUES (?, ?);"
-    insert(statement, (description, user_id))
-    bottle.redirect('/')
+    task = Task()
+    task.description = bottle.request.POST.description
+    storage.new_task(task, bottle.request.POST.get('parent_task_id'))
+    bottle.redirect(ROOT_PATH)
 
 @app.post('/start/<task_id>')
 def start(task_id):
-    statement = "INSERT INTO events(type, task_id) VALUES ('STARTED', ?);"
-    insert(statement, (task_id))
-    bottle.redirect('/')
+    task = Task()
+    task.from_storage(storage.get_task(task_id))
+    task.start()
+    storage.update_task(task)
+    bottle.redirect(ROOT_PATH)
 
 @app.post('/done/<task_id>')
 def done(task_id):
-    statement = "INSERT INTO events(type, task_id) VALUES ('DONE', ?);"
-    insert(statement, (task_id))
-    bottle.redirect('/')
+    task = Task()
+    task.from_storage(storage.get_task(task_id))
+    task.done()
+    storage.update_task(task)
+    bottle.redirect(ROOT_PATH)
 
 @app.post('/failed/<task_id>')
 def failed(task_id):
-    statement = "INSERT INTO events(type, task_id) VALUES ('FAILED', ?);"
-    insert(statement, (task_id))
-    bottle.redirect('/')
+    task = Task()
+    task.from_storage(storage.get_task(task_id))
+    task.failed()
+    storage.update_task(task)
+    bottle.redirect(ROOT_PATH)
 
-@app.post('/delete/<task_id>')
-def delete(task_id):
-    statement = "DELETE FROM events WHERE task_id = ?"
-    insert(statement, (task_id))
-    statement = "DELETE FROM tasks WHERE task_id = ?"
-    insert(statement, (task_id))
-    bottle.redirect('/')
-
-app.run(host='localhost', port=8080, debug=True, reloader=True)
+app.run(host='0.0.0.0', port=8002)
